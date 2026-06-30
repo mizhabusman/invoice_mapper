@@ -28,11 +28,7 @@ st.caption("Upload a text-based invoice PDF and get clean, standardised JSON.")
 
 settings = load_settings()
 if not settings.is_api_key_present:
-    st.warning(
-        "No API key found. Copy `.env.example` to `.env` and add your "
-        "`ANTHROPIC_API_KEY`, then restart the app.",
-        icon="⚠️",
-    )
+    st.warning("API key not found. Please contact your administrator.", icon="⚠️")
 
 # A bumpable key lets "New extraction" fully reset the uploader widget.
 st.session_state.setdefault("uploader_key", 0)
