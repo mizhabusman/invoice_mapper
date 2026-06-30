@@ -1,0 +1,8 @@
+# Premium neutral light theme. Warm off-white (not pure white) with soft
+# contrast cards and a muted slate accent.
+[theme]
+base = "light"
+primaryColor = "#4F5D75"
+backgroundColor = "#F4F2EC"
+secondaryBackgroundColor = "#FCFBF8"
+textColor = "#24272E"
