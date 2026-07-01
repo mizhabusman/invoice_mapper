@@ -44,7 +44,45 @@ class InvoiceSegment:
     """One invoice's worth of pages and combined text."""
 
     pages: list[int] = field(default_factory=list)  # 1-based page numbers
-    text: str = ""
+    text: str = ""  # all pages joined (full, untrimmed — kept for provenance)
+    page_texts: list[str] = field(default_factory=list)  # per-page text, same order
+
+
+# --- Boilerplate detection (used to trim dead pages before sending to the AI) --
+_TC_MARKER = re.compile(
+    r"TERMS\s+AND\s+CONDITIONS|TERMS\s*&\s*CONDITIONS|TERMS\s+OF\s+SALE", re.IGNORECASE
+)
+_AMOUNT = re.compile(r"\d[\d,]*\.\d{2}(?!\d)")  # a currency-style amount, e.g. 1,234.56
+_STRONG_DATA = re.compile(r"GSTIN|\bHSN\b|\bSAC\b|TAXABLE\s+VALUE|\bIRN\b", re.IGNORECASE)
+
+
+def is_boilerplate_page(text: str) -> bool:
+    """True only for a page that is clearly pure terms & conditions / legal prose.
+
+    Deliberately conservative: a page is dropped ONLY if it has a T&C heading AND
+    contains no currency amounts AND no GSTIN/HSN/IRN. Any real data page has
+    amounts, so this can never drop a page that carries invoice data.
+    """
+    if not _TC_MARKER.search(text):
+        return False
+    if _AMOUNT.search(text) or _STRONG_DATA.search(text):
+        return False
+    return True
+
+
+def text_for_mapping(segment: "InvoiceSegment") -> str:
+    """Return the segment text to send to the model, with dead T&C pages removed.
+
+    Falls back to the full text whenever trimming isn't safe (single-page
+    segment, nothing to drop, or everything would be dropped) — so the worst
+    case is identical to sending the untrimmed text.
+    """
+    if len(segment.page_texts) <= 1:
+        return segment.text
+    kept = [t for t in segment.page_texts if not is_boilerplate_page(t)]
+    if not kept or len(kept) == len(segment.page_texts):
+        return segment.text
+    return "\n\n".join(kept)
 
 
 def find_irn(page_text: str) -> str | None:
@@ -86,6 +124,7 @@ def has_title_header(page_text: str, max_lines: int = 3) -> bool:
 
 def _append(segments: list[InvoiceSegment], current: InvoiceSegment, page_no: int, text: str) -> None:
     current.pages.append(page_no)
+    current.page_texts.append(text)
     current.text = text if not current.text else f"{current.text}\n\n{text}"
 
 

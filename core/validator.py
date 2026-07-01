@@ -27,6 +27,60 @@ def _present(*values: object) -> list[float]:
     return [float(v) for v in values if isinstance(v, (int, float))]
 
 
+def _num(value: object) -> float | None:
+    """Return value as float if it is a real number, else None."""
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _check_lines(invoice: Invoice) -> list[str]:
+    """Best-effort per-line arithmetic checks (warnings only, data unchanged).
+
+    Catches gross mismatches such as a swapped rate/rate-incl column or a
+    misplaced decimal — errors that reconcile at the invoice level and would
+    otherwise pass silently.
+    """
+    warnings: list[str] = []
+    lines = invoice.line_items
+
+    # rate x qty should reconcile with the line's taxable value or amount.
+    bad: list = []
+    for position, li in enumerate(lines, start=1):
+        qty = _num(li.qty)
+        discount = _num(li.discount)
+        if not qty or (discount and discount != 0):
+            continue  # skip zero/None qty and discounted lines (taxable != rate*qty)
+        rates = [r for r in (_num(li.rate), _num(li.rate_incl_tax)) if r is not None]
+        targets = [t for t in (_num(li.taxable_value), _num(li.amount)) if t is not None]
+        if not rates or not targets:
+            continue
+        # OK if ANY rate x qty matches ANY target within 2% (absorbs rounding,
+        # tax-inclusive vs exclusive, small discounts).
+        reconciles = any(
+            abs(r * qty - t) <= max(1.0, 0.02 * abs(t)) for r in rates for t in targets
+        )
+        if not reconciles:
+            bad.append(_num(li.sno) or position)
+
+    if bad:
+        labels = ", ".join(str(int(b)) for b in bad)
+        warnings.append(
+            f"Line(s) {labels}: rate x qty does not match the line amount — verify rate/qty."
+        )
+
+    # Sum of per-line taxable values should match the invoice total_taxable.
+    line_taxables = [_num(li.taxable_value) for li in lines]
+    total_taxable = _num(invoice.totals.total_taxable)
+    if lines and total_taxable is not None and all(t is not None for t in line_taxables):
+        line_sum = sum(line_taxables)  # type: ignore[arg-type]
+        if abs(line_sum - total_taxable) > max(1.0, 0.01 * abs(total_taxable)):
+            warnings.append(
+                f"Sum of line taxable values ({line_sum:.2f}) does not match "
+                f"total_taxable ({invoice.totals.total_taxable})."
+            )
+
+    return warnings
+
+
 def _check_totals(invoice: Invoice) -> list[str]:
     """Return warnings for any totals that don't reconcile."""
     warnings: list[str] = []
@@ -93,7 +147,7 @@ def validate_invoice(raw: dict) -> tuple[dict, list[str]]:
     if invoice is None:
         return Invoice().model_dump(), ["Could not parse the extracted data."]
 
-    warnings = _check_totals(invoice)
+    warnings = _check_totals(invoice) + _check_lines(invoice)
     if dropped:
         warnings.append(
             "Some fields could not be parsed and were left blank: "

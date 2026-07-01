@@ -22,7 +22,7 @@ from typing import Callable, Optional
 from config import Settings, estimate_cost, load_settings
 from core.extractor import extract_pages, has_text
 from core.mapper import build_client, map_invoice
-from core.splitter import InvoiceSegment, split_invoices
+from core.splitter import InvoiceSegment, split_invoices, text_for_mapping
 from core.validator import validate_invoice
 
 # Optional callback invoked as (completed_count, total_count) for UI progress.
@@ -61,7 +61,7 @@ class ProcessResult:
 
 def _process_segment(client, model: str, segment: InvoiceSegment, index: int, filename: str):
     """Map + validate one segment; return (record, MapResult-with-usage)."""
-    mapped = map_invoice(client, model, segment.text)
+    mapped = map_invoice(client, model, text_for_mapping(segment))
     clean, warnings = validate_invoice(mapped.data)
     clean["_source"] = {
         "file": filename,
