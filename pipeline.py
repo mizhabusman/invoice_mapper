@@ -38,10 +38,17 @@ class Usage:
     """Aggregated token spend and estimated cost for a processing run."""
 
     model: str
-    input_tokens: int = 0
+    input_tokens: int = 0  # uncached input, billed at full rate
+    cache_read_tokens: int = 0  # prefix re-read from cache (0.1x)
+    cache_write_tokens: int = 0  # prefix written to cache (1.25x)
     output_tokens: int = 0
     cost_usd: Optional[float] = None  # None when the model has no known pricing
     cost_inr: Optional[float] = None  # cost_usd converted at the configured rate
+
+    @property
+    def total_input_tokens(self) -> int:
+        """Full prompt size across all calls (uncached + cached read + written)."""
+        return self.input_tokens + self.cache_read_tokens + self.cache_write_tokens
 
 
 @dataclass
@@ -52,10 +59,8 @@ class ProcessResult:
     usage: Optional[Usage] = None
 
 
-def _process_segment(
-    client, model: str, segment: InvoiceSegment, index: int, filename: str
-) -> tuple[dict, int, int]:
-    """Map + validate one segment; return the record and its token usage."""
+def _process_segment(client, model: str, segment: InvoiceSegment, index: int, filename: str):
+    """Map + validate one segment; return (record, MapResult-with-usage)."""
     mapped = map_invoice(client, model, segment.text)
     clean, warnings = validate_invoice(mapped.data)
     clean["_source"] = {
@@ -64,7 +69,7 @@ def _process_segment(
         "pages": segment.pages,
     }
     clean["_warnings"] = warnings
-    return clean, mapped.input_tokens, mapped.output_tokens
+    return clean, mapped
 
 
 def process_pdf(
@@ -105,33 +110,41 @@ def process_pdf(
 
     client = build_client(settings.anthropic_api_key)
     total = len(segments)
-    results: list[Optional[tuple[dict, int, int]]] = [None] * total
+    results: list = [None] * total
     completed = 0
 
-    workers = max(1, min(settings.max_concurrency, total))
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {
-            executor.submit(
-                _process_segment, client, settings.model, segment, i + 1, filename
-            ): i
-            for i, segment in enumerate(segments)
-        }
-        # Collect as they finish to drive progress, but place by original index.
-        for future in as_completed(futures):
-            index = futures[future]
-            results[index] = future.result()
-            completed += 1
-            if progress:
-                progress(completed, total)
+    def run(i: int):
+        return _process_segment(client, settings.model, segments[i], i + 1, filename)
 
-    # No result can be None here (any exception would have propagated).
-    invoices = [r[0] for r in results if r is not None]
-    input_tokens = sum(r[1] for r in results if r is not None)
-    output_tokens = sum(r[2] for r in results if r is not None)
-    cost_usd = estimate_cost(settings.model, input_tokens, output_tokens)
+    # Process the first invoice alone so it WRITES the shared prompt-cache prefix
+    # (system + tool schema). Only after a response starts is that cache readable,
+    # so the remaining invoices are fanned out afterwards to READ it at 0.1x.
+    results[0] = run(0)
+    completed = 1
+    if progress:
+        progress(completed, total)
+
+    if total > 1:
+        workers = max(1, min(settings.max_concurrency, total - 1))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(run, i): i for i in range(1, total)}
+            for future in as_completed(futures):
+                results[futures[future]] = future.result()
+                completed += 1
+                if progress:
+                    progress(completed, total)
+
+    invoices = [r[0] for r in results]
+    input_tokens = sum(r[1].input_tokens for r in results)
+    output_tokens = sum(r[1].output_tokens for r in results)
+    cache_read = sum(r[1].cache_read_tokens for r in results)
+    cache_write = sum(r[1].cache_write_tokens for r in results)
+    cost_usd = estimate_cost(settings.model, input_tokens, output_tokens, cache_read, cache_write)
     usage = Usage(
         model=settings.model,
         input_tokens=input_tokens,
+        cache_read_tokens=cache_read,
+        cache_write_tokens=cache_write,
         output_tokens=output_tokens,
         cost_usd=cost_usd,
         cost_inr=cost_usd * settings.usd_to_inr if cost_usd is not None else None,

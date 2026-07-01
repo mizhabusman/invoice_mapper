@@ -95,7 +95,10 @@ if results:
                 st.markdown(f"**Estimated cost:** ₹{usage.cost_inr:,.2f}  (≈ ${usage.cost_usd:.4f})")
             else:
                 st.markdown("**Estimated cost:** n/a")
-            st.markdown(f"**Input tokens:** {usage.input_tokens:,}")
+            cached_note = (
+                f"  ({usage.cache_read_tokens:,} cached)" if usage.cache_read_tokens else ""
+            )
+            st.markdown(f"**Input tokens:** {usage.total_input_tokens:,}{cached_note}")
             st.markdown(f"**Output tokens:** {usage.output_tokens:,}")
             st.markdown(f"**Model:** {usage.model}")
 

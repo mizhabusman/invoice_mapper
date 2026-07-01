@@ -25,7 +25,7 @@ _SYSTEM_PROMPT = """You are an expert at reading Indian GST invoices, credit not
 
 Rules:
 - Extract EVERY field that appears anywhere on the invoice into its matching field. If a value is printed, you must find it and map it — do not leave a present value out.
-- Use null for any field that is genuinely not present. Use a real null value, never the string "null". Never invent, guess, or carry over values from a different invoice. Empty line-item lists / parties stay empty rather than fabricated.
+- For any field that is genuinely not present, OMIT it entirely from your tool call — do not include the key at all, and never output the string "null". Omitted fields are treated as absent. Include every field that DOES have a real value. Never invent, guess, or carry over values from a different invoice.
 - Copy identifiers, dates, IRNs, e-Way bill numbers and amounts-in-words EXACTLY as printed (verbatim). Do not reformat or normalise dates.
 - For numeric fields output plain numbers with no commas, currency symbols or percent signs (e.g. 113262.75, not "1,13,262.75").
 - Indian invoices group digits in the lakh/crore system: "1,43,008.48" means 143008.48 and "18,75,000.00" means 1875000.00. Remove the commas and transcribe the EXACT digits and decimal point — never drop, add, or shift the decimal.
@@ -53,8 +53,10 @@ class MapResult:
     """The extracted invoice data plus the token usage of the call that produced it."""
 
     data: dict
-    input_tokens: int
+    input_tokens: int  # uncached input, billed at full rate
     output_tokens: int
+    cache_read_tokens: int = 0   # prefix served from cache (0.1x)
+    cache_write_tokens: int = 0  # prefix written to cache (1.25x)
 
 
 def build_client(api_key: str) -> Anthropic:
@@ -81,7 +83,13 @@ def map_invoice(client: Anthropic, model: str, invoice_text: str) -> MapResult:
     response = client.messages.create(
         model=model,
         max_tokens=_MAX_TOKENS,
-        system=_SYSTEM_PROMPT,
+        # cache_control on the (last) system block caches the fixed prefix that
+        # renders before it — tools + system — so repeated invoice calls re-read
+        # it at 0.1x instead of paying full price every time. The invoice text
+        # lives in messages (after the breakpoint) and is never cached.
+        system=[
+            {"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}
+        ],
         tools=[tool],
         tool_choice={"type": "tool", "name": TOOL_NAME},
         messages=[{"role": "user", "content": invoice_text}],
@@ -89,10 +97,13 @@ def map_invoice(client: Anthropic, model: str, invoice_text: str) -> MapResult:
 
     for block in response.content:
         if block.type == "tool_use" and block.name == TOOL_NAME:
+            usage = response.usage
             return MapResult(
                 data=dict(block.input),
-                input_tokens=response.usage.input_tokens,
-                output_tokens=response.usage.output_tokens,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
+                cache_write_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
             )
 
     raise MappingError("Model did not return an extract_invoice tool call.")

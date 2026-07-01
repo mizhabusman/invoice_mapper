@@ -43,13 +43,28 @@ MODEL_TIERS: dict[str, str] = {
 DEFAULT_TIER = "medium"  # balanced accuracy/cost; Low for simple, High for complex
 
 
-def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float | None:
-    """Estimate USD cost for a token spend, or None if the model isn't priced."""
+def estimate_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> float | None:
+    """Estimate USD cost for a token spend, or None if the model isn't priced.
+
+    Prompt-cache pricing: cached reads bill at 0.1x the input rate, cache writes
+    at 1.25x (5-minute TTL). `input_tokens` is the uncached remainder.
+    """
     pricing = MODEL_PRICING.get(model)
     if pricing is None:
         return None
     input_rate, output_rate = pricing
-    return (input_tokens / 1_000_000) * input_rate + (output_tokens / 1_000_000) * output_rate
+    return (
+        (input_tokens / 1_000_000) * input_rate
+        + (cache_read_tokens / 1_000_000) * input_rate * 0.1
+        + (cache_write_tokens / 1_000_000) * input_rate * 1.25
+        + (output_tokens / 1_000_000) * output_rate
+    )
 
 
 @dataclass(frozen=True)
